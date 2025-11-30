@@ -1,0 +1,14 @@
+spring:
+  application:
+    name: moniepoint
+
+server:
+  port: 8080
+
+logging:
+  level:
+    reactor:
+      netty: DEBUG
+
+
+
