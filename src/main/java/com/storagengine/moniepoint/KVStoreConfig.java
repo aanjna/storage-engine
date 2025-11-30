@@ -9,6 +9,7 @@ import java.nio.file.Path;
 
 @Configuration
 public class KVStoreConfig {
+
     @Bean
     public KeyValueStore keyValueStore() throws IOException {
         Path storageFolder = Path.of("./storedata");

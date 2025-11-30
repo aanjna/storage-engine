@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.file.Path;
 import java.util.*;
+import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 
 public class StorageEngine implements KeyValueStore {
@@ -76,12 +77,13 @@ public class StorageEngine implements KeyValueStore {
 
     @Override
     public NavigableMap<String, byte[]> readKeyRange(String startKey, String endKey) throws IOException {
-        NavigableMap<String, Long> subIndex = index.subMap(startKey, true, endKey, true);
-        NavigableMap<String, byte[]> results = new TreeMap<>();
-        for (var entry : subIndex.entrySet()) {
-            read(entry.getKey()).ifPresent(value -> results.put(entry.getKey(), value));
+        ConcurrentNavigableMap<String, Long> subIndex = index.subMap(startKey, true, endKey, true);
+        NavigableMap<String, byte[]> result = new TreeMap<>();
+
+        for (Map.Entry<String, Long> entry : subIndex.entrySet()) {
+            read(entry.getKey()).ifPresent(v -> result.put(entry.getKey(), v));
         }
-        return results;
+        return result;
     }
 
     @Override
