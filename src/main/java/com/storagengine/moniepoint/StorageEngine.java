@@ -1,102 +1,85 @@
 package com.storagengine.moniepoint;
 
-import java.io.IOException;
-import java.io.RandomAccessFile;
-import java.nio.file.Path;
+import java.io.*;
 import java.util.*;
-import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 
 public class StorageEngine implements KeyValueStore {
-    private final Path dataFile;
-    private final RandomAccessFile raf;
+
     //Using a ConcurrentSkipListMap to maintain an in-memory sorted index enabling efficient key-range queries.
-    private final ConcurrentSkipListMap<String, Long> index = new ConcurrentSkipListMap<>();
-    private final Object writeLock = new Object();
+    // high-concurrency sorted map
+    private final ConcurrentSkipListMap<String, byte[]> memTable = new ConcurrentSkipListMap<>();
+    private final WriteAheadLog wal;
 
-    public StorageEngine(Path storagePath) throws IOException {
-        this.dataFile = storagePath.resolve("data.log");
-        this.raf = new RandomAccessFile(dataFile.toFile(), "rw");
-        loadIndex();
+    // threshold before flushing to disk
+    private static final int MEMTABLE_LIMIT = 10_000;
+
+    public StorageEngine(WriteAheadLog wal) throws Exception {
+        this.wal = wal;
+        recover();
     }
 
-    private void loadIndex() throws IOException {
-        long pos = 0;
-        raf.seek(0);
-        while (pos < raf.length()) {
-            raf.seek(pos);
-            int keyLen = raf.readInt();
-            byte[] keyBytes = new byte[keyLen];
-            raf.readFully(keyBytes);
-            String key = new String(keyBytes);
-
-            int valLen = raf.readInt();
-            raf.skipBytes(valLen); // Skip value bytes
-
-            index.put(key, pos);
-            pos = raf.getFilePointer();
-        }
+    private void recover() throws Exception {
+        wal.replay((key, value, op) -> {
+            if ("PUT".equals(op)) memTable.put(key, Base64.getDecoder().decode(value));
+            else if ("DEL".equals(op)) memTable.remove(key);
+        });
     }
 
+    private void walPut(String key, byte[] value) throws IOException {
+        wal.append("PUT," + key + "," + Base64.getEncoder().encodeToString(value));
+    }
 
+    private void walDelete(String key) throws IOException {
+        wal.append("DEL," + key);
+    }
+
+    private synchronized void flushToSSTable() throws IOException {
+        // TODO: Add actual SSTable writer logic.
+        memTable.clear();
+    }
+
+    // -------------------------
+    // Core KV Operations
+    // -------------------------
 
     @Override
     public void put(String key, byte[] value) throws IOException {
-        Objects.requireNonNull(key);
-        Objects.requireNonNull(value);
-        synchronized (writeLock) {
-            raf.seek(raf.length());
-            long pos = raf.getFilePointer();
+        walPut(key, value);
+        memTable.put(key, value);
 
-            byte[] keyBytes = key.getBytes();
-            raf.writeInt(keyBytes.length);
-            raf.write(keyBytes);
-            raf.writeInt(value.length);
-            raf.write(value);
-            raf.getFD().sync();
-
-            index.put(key, pos);
+        if (memTable.size() >= MEMTABLE_LIMIT) {
+            flushToSSTable();
         }
     }
 
     @Override
-    public Optional<byte[]> read(String key) throws IOException {
-        Long pos = index.get(key);
-        if (pos == null) return Optional.empty();
-
-        synchronized (raf) {
-            raf.seek(pos);
-            int keyLen = raf.readInt();
-            raf.skipBytes(keyLen);
-            int valLen = raf.readInt();
-            byte[] valBytes = new byte[valLen];
-            raf.readFully(valBytes);
-            return Optional.of(valBytes);
-        }
+    public Optional<byte[]> read(String key) {
+        return Optional.ofNullable(memTable.get(key));
     }
 
     @Override
-    public NavigableMap<String, byte[]> readKeyRange(String startKey, String endKey) throws IOException {
-        ConcurrentNavigableMap<String, Long> subIndex = index.subMap(startKey, true, endKey, true);
-        NavigableMap<String, byte[]> result = new TreeMap<>();
-
-        for (Map.Entry<String, Long> entry : subIndex.entrySet()) {
-            read(entry.getKey()).ifPresent(v -> result.put(entry.getKey(), v));
-        }
-        return result;
+    public NavigableMap<String, byte[]> readKeyRange(String startKey, String endKey) {
+        return memTable.subMap(startKey, true, endKey, true);
     }
 
     @Override
-    public void batchPut(Map<String, byte[]> entries) throws IOException {
-        synchronized (writeLock) {
-            for (var e : entries.entrySet()) {
-                put(e.getKey(), e.getValue());
-            }
+    public void batchPut(Map<String, byte[]> kvs) throws IOException {
+        for (var e : kvs.entrySet()) {
+            walPut(e.getKey(), e.getValue());
+            memTable.put(e.getKey(), e.getValue());
+        }
+
+        if (memTable.size() >= MEMTABLE_LIMIT) {
+            flushToSSTable();
         }
     }
 
     @Override
     public void delete(String key) throws IOException {
-        put(key, new byte[0]);  // tombstone entry for delete
+        walDelete(key);
+        memTable.remove(key);
     }
+
+
 }
